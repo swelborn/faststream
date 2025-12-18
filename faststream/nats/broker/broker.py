@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import Iterable, Sequence
 from typing import (
@@ -423,6 +424,8 @@ class NatsBroker(
             ),
         )
 
+        self._recreate_consumers_lock = asyncio.Lock()
+
     async def _connect(self) -> "Client":
         connection = await nats.connect(**self._connection_kwargs)
         self.config.connect(connection)
@@ -512,6 +515,34 @@ class NatsBroker(
                 stream.declare = False
 
         await super().start()
+
+    async def recreate_consumers(self) -> None:
+        """Stop and restart all subscribers to recreate JetStream consumers."""
+        if not self.running:
+            return
+
+        if self._recreate_consumers_lock.locked():
+            return
+
+        async with self._recreate_consumers_lock:
+            if not self.running:
+                return
+
+            self.config.logger.log(
+                "Recreating NATS consumers after ServiceUnavailableError",
+                logging.WARNING,
+            )
+
+            for subscriber in self.subscribers:
+                try:
+                    await subscriber.stop()
+                    await subscriber.start()
+                except Exception as exc:  # pragma: no cover - defensive
+                    self.config.logger.log(
+                        "Failed to recreate NATS consumer",
+                        logging.ERROR,
+                        exc_info=exc,
+                    )
 
     @overload
     async def publish(

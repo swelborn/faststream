@@ -1,3 +1,4 @@
+import asyncio
 from abc import abstractmethod
 from collections.abc import Iterable
 from typing import (
@@ -5,6 +6,8 @@ from typing import (
     Any,
     Optional,
 )
+
+from nats.js.errors import ServiceUnavailableError
 
 from faststream._internal.endpoint.subscriber.usecase import SubscriberUsecase
 from faststream._internal.types import MsgType
@@ -97,6 +100,14 @@ class LogicSubscriber(SubscriberUsecase[MsgType]):
     async def _create_subscription(self) -> None:
         """Create NATS subscription object to consume messages."""
         raise NotImplementedError
+
+    def on_task_error(self, exc: BaseException) -> bool:
+        if isinstance(exc, ServiceUnavailableError):
+            broker = self._outer_config.extra_context.get("broker")
+            if broker is not None:
+                asyncio.create_task(broker.recreate_consumers())
+
+        return True
 
     @staticmethod
     def build_log_context(

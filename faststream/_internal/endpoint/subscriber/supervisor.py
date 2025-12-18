@@ -108,16 +108,34 @@ class TaskCallbackSupervisor:
             return
 
         if (exc := task.exception()) and not isinstance(exc, self.ignored_exceptions):
-            # trace is printed only once, but task is still retried
+            restart_task = True
+
+            if on_error := getattr(self.subscriber, "on_task_error", None):
+                try:
+                    result = on_error(exc)
+                except Exception as hook_exc:  # pragma: no cover - defensive hook guard
+                    logger.log(
+                        "Task error hook failed; falling back to default restart behaviour.",
+                        log_level=logging.ERROR,
+                        exc_info=hook_exc,
+                    )
+                else:
+                    if result is not None:
+                        restart_task = bool(result)
+
+            action = "retrying" if restart_task else "skipping retry"
+
+            # trace is printed only once, but task is still retried/handled according to restart_task
             identifier = self._get_exception_identifier(exc)
             if identifier not in self.__cache:
                 self.__cache.add(identifier)
                 logger.log(
-                    f"{task.get_name()} raised an exception, retrying...\n"
+                    f"{task.get_name()} raised an exception, {action}...\n"
                     "If this behavior causes issues, you can disable it via setting the FASTSTREAM_SUPERVISOR_DISABLED env to 1. "
                     "Also, please consider opening issue on the repository: https://github.com/ag2ai/faststream.",
                     exc_info=exc,
                     log_level=logging.ERROR,
                 )
 
-            self.subscriber.add_task(self.func, self.args, self.kwargs)
+            if restart_task:
+                self.subscriber.add_task(self.func, self.args, self.kwargs)
