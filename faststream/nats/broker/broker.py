@@ -425,6 +425,7 @@ class NatsBroker(
         )
 
         self._recreate_consumers_lock = asyncio.Lock()
+        self._recreate_consumers_task: asyncio.Task[None] | None = None
 
     async def _connect(self) -> "Client":
         connection = await nats.connect(**self._connection_kwargs)
@@ -515,6 +516,33 @@ class NatsBroker(
                 stream.declare = False
 
         await super().start()
+
+    def _clear_recreate_task(self, task: asyncio.Task[None]) -> None:
+        if self._recreate_consumers_task is task:
+            self._recreate_consumers_task = None
+
+    def schedule_recreate_consumers(self) -> asyncio.Task[None] | None:
+        """Schedule consumer recreation once; coalesces concurrent requests."""
+        if not self.running:
+            return None
+
+        if self._recreate_consumers_task and not self._recreate_consumers_task.done():
+            return self._recreate_consumers_task
+
+        async def _runner() -> None:
+            try:
+                await self.recreate_consumers()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self.config.logger.log(
+                    "Failed to recreate NATS consumer",
+                    logging.ERROR,
+                    exc_info=exc,
+                )
+
+        task = asyncio.create_task(_runner())
+        self._recreate_consumers_task = task
+        task.add_done_callback(self._clear_recreate_task)
+        return task
 
     async def recreate_consumers(self) -> None:
         """Stop and restart all subscribers to recreate JetStream consumers."""

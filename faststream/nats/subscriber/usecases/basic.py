@@ -105,9 +105,9 @@ class LogicSubscriber(SubscriberUsecase[MsgType]):
         if isinstance(exc, ServiceUnavailableError):
             broker = self._outer_config.extra_context.get("broker")
             if broker is not None:
-                asyncio.create_task(broker.recreate_consumers())
+                broker.schedule_recreate_consumers()
 
-        return True
+        return False
 
     @staticmethod
     def build_log_context(
