@@ -25,8 +25,8 @@ from nats.aio.client import (
     Client,
 )
 from nats.aio.msg import Msg
-from nats.errors import Error
-from nats.js.errors import BadRequestError
+from nats.errors import Error, TimeoutError as NatsTimeoutError
+from nats.js.errors import BadRequestError, ServiceUnavailableError
 from typing_extensions import deprecated, overload, override
 
 from faststream.__about__ import SERVICE_NAME
@@ -561,15 +561,56 @@ class NatsBroker(
                 logging.WARNING,
             )
 
-            for subscriber in self.subscribers:
-                try:
-                    await subscriber.stop()
-                    await subscriber.start()
-                except Exception as exc:  # pragma: no cover - defensive
+            for round_idx in range(3):
+                all_ok = True
+
+                for subscriber in self.subscribers:
+                    sub_ok = False
+                    for attempt in range(3):
+                        try:
+                            await subscriber.stop()
+                            await subscriber.start()
+                        except (
+                            ServiceUnavailableError,
+                            NatsTimeoutError,
+                            Error,
+                            asyncio.TimeoutError,
+                        ) as exc:
+                            if attempt == 2:
+                                self.config.logger.log(
+                                    "Failed to recreate NATS consumer",
+                                    logging.ERROR,
+                                    exc_info=exc,
+                                )
+                            else:
+                                backoff = 0.5 * (attempt + 1)
+                                self.config.logger.log(
+                                    "Retrying to recreate NATS consumer after transient error",
+                                    logging.WARNING,
+                                    exc_info=exc,
+                                )
+                                await asyncio.sleep(backoff)
+                                continue
+                        except Exception as exc:  # pragma: no cover - defensive
+                            self.config.logger.log(
+                                "Failed to recreate NATS consumer",
+                                logging.ERROR,
+                                exc_info=exc,
+                            )
+                        else:
+                            sub_ok = True
+                            break
+
+                    all_ok = all_ok and sub_ok
+
+                if all_ok:
+                    break
+
+                if round_idx < 2:
+                    await asyncio.sleep(1 * (round_idx + 1))
                     self.config.logger.log(
-                        "Failed to recreate NATS consumer",
-                        logging.ERROR,
-                        exc_info=exc,
+                        "Retrying consumer recreation batch after transient errors",
+                        logging.WARNING,
                     )
 
     @overload
